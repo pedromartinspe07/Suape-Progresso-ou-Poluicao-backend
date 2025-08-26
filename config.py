@@ -1,6 +1,15 @@
 import os
+from dotenv import load_dotenv
+
+# Carrega as variáveis de ambiente do arquivo .env em ambiente de desenvolvimento
+# O Railway já gerencia isso em produção, então não precisamos dessa linha lá.
+if os.environ.get("FLASK_ENV") != "production":
+    load_dotenv()
 
 class Config:
-    # A variável de ambiente DATABASE_URL será fornecida pelo Railway
+    """Configurações de base para a aplicação Flask."""
+
+    # A variável de ambiente DATABASE_URL é fornecida pelo Railway em produção,
+    # e pelo arquivo .env em desenvolvimento.
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL')
     SQLALCHEMY_TRACK_MODIFICATIONS = False

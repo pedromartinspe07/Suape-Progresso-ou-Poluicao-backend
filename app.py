@@ -2,18 +2,19 @@ import os
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
+
+# Importa a classe de configuração
 from config import Config
-from dotenv import load_dotenv  # Importe a biblioteca
 
-# Carrega as variáveis do arquivo .env
-load_dotenv() 
-
+# Inicializa o Flask
 app = Flask(__name__)
+# Carrega as configurações do arquivo config.py
 app.config.from_object(Config)
 
 # Inicializa o SQLAlchemy
 db = SQLAlchemy(app)
 
+# Permite requisições do seu frontend (ajuste para a URL do seu site em produção)
 CORS(app)
 
 # ====================================================================
@@ -49,7 +50,7 @@ class BlogPost(db.Model):
 @app.route('/api/posts', methods=['GET'])
 def get_posts():
     """Retorna a lista de todos os posts do blog."""
-    posts = BlogPost.query.all()
+    posts = BlogPost.query.order_by(BlogPost.id.desc()).all()
     return jsonify([post.to_dict() for post in posts])
 
 @app.route('/api/posts/<int:post_id>', methods=['GET'])
@@ -68,7 +69,7 @@ def add_post():
         category=data['category'],
         excerpt=data['excerpt'],
         image=data.get('image'),
-        tags=','.join(data.get('tags', []))
+        tags=','.join(data.get('tags', [])) if 'tags' in data and data['tags'] else None
     )
     db.session.add(new_post)
     db.session.commit()
@@ -79,13 +80,18 @@ def index():
     return jsonify({"message": "API do blog está no ar!"})
 
 
+# ====================================================================
+# Ponto de entrada da aplicação
+# ====================================================================
+
+# O código dentro deste bloco só é executado quando você roda `python app.py`
+# e é ignorado em ambientes de produção como o Railway, que usa o Gunicorn.
 if __name__ == '__main__':
-    # Cria as tabelas do banco de dados antes de iniciar o app
-    # Isso só precisa ser feito uma vez, ou a cada vez que a estrutura do Model for alterada.
+    # Cria as tabelas do banco de dados (se elas não existirem).
+    # Isso é seguro para rodar e garante que a estrutura do banco esteja pronta.
     with app.app_context():
         db.create_all()
 
-    # Em ambiente de produção no Railway, o servidor é executado de forma diferente
-    # por isso, o `app.run` é usado apenas para testes locais.
+    # O servidor web de desenvolvimento Flask é usado apenas para testes locais.
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
