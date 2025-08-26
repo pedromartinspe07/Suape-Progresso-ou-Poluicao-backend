@@ -3,6 +3,10 @@ from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from config import Config
+from dotenv import load_dotenv  # Importe a biblioteca
+
+# Carrega as variáveis do arquivo .env
+load_dotenv() 
 
 app = Flask(__name__)
 app.config.from_object(Config)
