@@ -11,7 +11,7 @@ from minio import Minio
 from werkzeug.utils import secure_filename
 
 # Importa classes adicionais para recuperação de senha
-from itsdangerous import TimedJSONWebSignatureSerializer as Serializer
+from itsdangerous import URLSafeTimedSerializer as Serializer
 from itsdangerous import BadSignature, SignatureExpired
 
 # Importa a classe de configuração
