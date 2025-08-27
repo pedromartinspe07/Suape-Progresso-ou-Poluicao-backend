@@ -13,3 +13,8 @@ class Config:
     # e pelo arquivo .env em desenvolvimento.
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+    # Variáveis de ambiente para o MinIO
+    MINIO_URL = os.environ.get('MINIO_URL')
+    MINIO_ACCESS_KEY = os.environ.get('MINIO_ACCESS_KEY')
+    MINIO_SECRET_KEY = os.environ.get('MINIO_SECRET_KEY')
