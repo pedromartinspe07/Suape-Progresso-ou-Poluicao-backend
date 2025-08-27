@@ -1,7 +1,7 @@
 import os
 import json
-import redis 
-from functools import wraps # Importa wraps para o decorador
+import redis
+from functools import wraps
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
@@ -9,6 +9,10 @@ from flask_bcrypt import Bcrypt
 from flask_login import UserMixin, LoginManager, login_user, logout_user, login_required, current_user
 from minio import Minio
 from werkzeug.utils import secure_filename
+
+# Importa classes adicionais para recuperação de senha
+from itsdangerous import TimedJSONWebSignatureSerializer as Serializer
+from itsdangerous import BadSignature, SignatureExpired
 
 # Importa a classe de configuração
 from config import Config
@@ -25,7 +29,14 @@ db = SQLAlchemy(app)
 # ====================================================================
 redis_url = os.getenv('REDIS_URL')
 if redis_url:
-    cache = redis.from_url(redis_url, decode_responses=True)
+    try:
+        cache = redis.from_url(redis_url, decode_responses=True)
+        # Testa a conexão
+        cache.ping()
+        print("Redis client initialized successfully.")
+    except redis.exceptions.ConnectionError as e:
+        cache = None
+        print(f"WARNING: Could not connect to Redis: {e}. Cache disabled.")
 else:
     cache = None
     print("WARNING: REDIS_URL not found. Cache disabled.")
@@ -120,6 +131,21 @@ class User(db.Model, UserMixin):
 
     def check_password(self, password):
         return bcrypt.check_password_hash(self.password_hash, password)
+    
+    def get_reset_token(self, expires_sec=1800):
+        """Cria um token para redefinição de senha."""
+        s = Serializer(app.config['SECRET_KEY'], expires_sec)
+        return s.dumps({'user_id': self.id}).decode('utf-8')
+    
+    @staticmethod
+    def verify_reset_token(token):
+        """Verifica se o token de redefinição de senha é válido."""
+        s = Serializer(app.config['SECRET_KEY'])
+        try:
+            user_id = s.loads(token)['user_id']
+        except (SignatureExpired, BadSignature):
+            return None
+        return User.query.get(user_id)
 
     def to_dict(self):
         return {
@@ -129,24 +155,48 @@ class User(db.Model, UserMixin):
         }
 
 # ====================================================================
-# Rotas
+# Rotas de Posts (com Paginação e Busca)
 # ====================================================================
 
 @app.route('/api/posts', methods=['GET'])
 def get_posts():
-    """Retorna a lista de posts do blog, usando cache do Redis."""
+    """
+    Retorna a lista de posts com suporte a paginação e busca.
+    Parâmetros da URL: ?page=1&per_page=10&search=termo
+    """
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 10, type=int)
+    search_term = request.args.get('search', '').strip()
+
+    # Cria uma chave de cache única para cada combinação de parâmetros
+    cache_key = f'posts_page_{page}_per_page_{per_page}_search_{search_term}'
+
+    # 1. Tenta buscar os dados do cache do Redis
     if cache:
-        cached_posts = cache.get('all_posts')
+        cached_posts = cache.get(cache_key)
         if cached_posts:
             return jsonify(json.loads(cached_posts))
-    
-    posts = BlogPost.query.order_by(BlogPost.id.desc()).all()
-    posts_list = [post.to_dict() for post in posts]
 
+    # 2. Se não estiver no cache, constrói a query
+    query = BlogPost.query.order_by(BlogPost.id.desc())
+
+    if search_term:
+        query = query.filter(BlogPost.title.ilike(f'%{search_term}%'))
+
+    paginated_posts = query.paginate(page=page, per_page=per_page, error_out=False)
+
+    posts_list = [post.to_dict() for post in paginated_posts.items]
+
+    # 3. Salva os dados no cache para futuras requisições
     if cache:
-        cache.set('all_posts', json.dumps(posts_list), ex=600)
+        cache.set(cache_key, json.dumps(posts_list), ex=600)
     
-    return jsonify(posts_list)
+    return jsonify({
+        "posts": posts_list,
+        "total_posts": paginated_posts.total,
+        "current_page": paginated_posts.page,
+        "total_pages": paginated_posts.pages
+    })
 
 @app.route('/api/posts/<int:post_id>', methods=['GET'])
 def get_post(post_id):
@@ -160,7 +210,6 @@ def add_post():
     """Adiciona um novo post ao banco de dados."""
     data = request.json
     
-    # Apenas usuários com a role 'admin' ou 'editor' podem adicionar posts.
     if current_user.role not in ['admin', 'editor']:
         return jsonify({"message": "Acesso não autorizado. Você não tem permissão para adicionar posts."}), 403
 
@@ -197,18 +246,18 @@ def add_post():
     db.session.commit()
     
     if cache:
-        cache.delete('all_posts')
+        # Invalida o cache
+        cache.flushdb()
 
     return jsonify(new_post.to_dict()), 201
 
 @app.route('/api/posts/<int:post_id>', methods=['PUT'])
-@admin_required # Apenas admins podem editar posts
+@admin_required
 def update_post(post_id):
-    """Atualiza um post existente. O cache é invalidado após a atualização."""
+    """Atualiza um post existente."""
     data = request.json
     post = BlogPost.query.get_or_404(post_id)
 
-    # Atualiza os campos do post
     post.title = data.get('title', post.title)
     post.date = data.get('date', post.date)
     post.category = data.get('category', post.category)
@@ -217,28 +266,66 @@ def update_post(post_id):
 
     db.session.commit()
     
-    # Invalida o cache
     if cache:
-        cache.delete('all_posts')
+        cache.flushdb()
 
     return jsonify({"message": "Post atualizado com sucesso!", "post": post.to_dict()})
 
 @app.route('/api/posts/<int:post_id>', methods=['DELETE'])
-@admin_required # Apenas admins podem deletar posts
+@admin_required
 def delete_post(post_id):
-    """Deleta um post existente. O cache é invalidado após a exclusão."""
+    """Deleta um post existente."""
     post = BlogPost.query.get_or_404(post_id)
     db.session.delete(post)
     db.session.commit()
     
-    # Invalida o cache
     if cache:
-        cache.delete('all_posts')
+        cache.flushdb()
 
     return jsonify({"message": "Post excluído com sucesso!"}), 200
 
 # ====================================================================
-# Rotas de Autenticação
+# Rotas de Gerenciamento de Usuários (Admin)
+# ====================================================================
+
+@app.route('/api/users', methods=['GET'])
+@admin_required
+def get_all_users():
+    """Retorna a lista de todos os usuários (apenas para admins)."""
+    users = User.query.all()
+    return jsonify([user.to_dict() for user in users])
+
+@app.route('/api/users/<int:user_id>', methods=['PUT'])
+@admin_required
+def update_user_role(user_id):
+    """Atualiza a role de um usuário (apenas para admins)."""
+    data = request.get_json()
+    new_role = data.get('role')
+    
+    if new_role not in ['admin', 'editor']:
+        return jsonify({"message": "Role inválida. Use 'admin' ou 'editor'."}), 400
+    
+    user = User.query.get_or_404(user_id)
+    user.role = new_role
+    db.session.commit()
+    
+    return jsonify({"message": f"Papel do usuário {user.username} atualizado para {new_role}."})
+
+@app.route('/api/users/<int:user_id>', methods=['DELETE'])
+@admin_required
+def delete_user(user_id):
+    """Deleta um usuário (apenas para admins)."""
+    if current_user.id == user_id:
+        return jsonify({"message": "Você não pode deletar a si mesmo."}), 403
+    
+    user = User.query.get_or_404(user_id)
+    db.session.delete(user)
+    db.session.commit()
+    
+    return jsonify({"message": f"Usuário {user.username} deletado com sucesso."})
+
+# ====================================================================
+# Rotas de Autenticação e Recuperação de Senha
 # ====================================================================
 
 @app.route('/api/register', methods=['POST'])
@@ -247,7 +334,7 @@ def register():
     data = request.get_json()
     username = data.get('username')
     password = data.get('password')
-    role = data.get('role', 'editor') # Padrão para 'editor'
+    role = data.get('role', 'editor')
 
     if not username or not password:
         return jsonify({"message": "Username e senha são obrigatórios."}), 400
@@ -292,10 +379,47 @@ def get_current_user():
     """Retorna as informações do usuário logado."""
     return jsonify({"user": current_user.to_dict()})
 
-@app.route('/', methods=['GET'])
-def index():
-    return jsonify({"message": "API do blog está no ar!"})
+@app.route('/api/forgot-password', methods=['POST'])
+def forgot_password():
+    """
+    Inicia o processo de recuperação de senha.
+    Gera um token e o envia para o email do usuário.
+    """
+    data = request.get_json()
+    username = data.get('username')
+    user = User.query.filter_by(username=username).first()
+    
+    if user:
+        # Aumentei o tempo de expiração para facilitar o teste
+        token = user.get_reset_token(expires_sec=3600) 
+        # Em produção, a lógica aqui seria enviar um email com o token.
+        # Para este exemplo, apenas retornamos o token para o frontend.
+        # NUNCA FAÇA ISSO EM PRODUCÃO!
+        print(f"Token de redefinição para {user.username}: {token}")
+        return jsonify({"message": "Um link de redefinição de senha foi enviado para seu email.", "token": token})
+    
+    return jsonify({"message": "Usuário não encontrado."}), 404
 
+@app.route('/api/reset-password', methods=['POST'])
+def reset_password():
+    """
+    Redefine a senha do usuário usando o token.
+    """
+    data = request.get_json()
+    token = data.get('token')
+    new_password = data.get('new_password')
+    
+    if not token or not new_password:
+        return jsonify({"message": "Token e nova senha são obrigatórios."}), 400
+    
+    user = User.verify_reset_token(token)
+    if not user:
+        return jsonify({"message": "O token é inválido ou expirou."}), 401
+    
+    user.set_password(new_password)
+    db.session.commit()
+    
+    return jsonify({"message": "Senha redefinida com sucesso."}), 200
 
 # ====================================================================
 # Ponto de entrada da aplicação
@@ -303,6 +427,8 @@ def index():
 
 if __name__ == '__main__':
     with app.app_context():
+        # A SECRET_KEY é necessária para o TimedJSONWebSignatureSerializer
+        app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or 'sua-chave-secreta-padrao-muito-segura'
         db.create_all()
 
     port = int(os.environ.get('PORT', 5000))
